@@ -1,129 +1,123 @@
 package com.pulsevoicephone
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.speech.tts.TextToSpeech
-import android.view.Gravity
-import android.view.ViewGroup
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
-import androidx.health.connect.client.permission.HealthPermission
-import androidx.health.connect.client.records.HeartRateRecord
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 
 class MainActivity : ComponentActivity() {
-    private val requiredPermissions = setOf(HealthPermission.getReadPermission(HeartRateRecord::class))
     private lateinit var bpmView: TextView
     private lateinit var statusView: TextView
     private lateinit var timeView: TextView
     private lateinit var voiceView: TextView
     private lateinit var toggleButton: Button
-    private var monitoring = false
     private var voiceEnabled = true
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
     private val formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss")
         .withZone(ZoneId.systemDefault())
 
-    private val permissions = registerForActivityResult(
+    private val healthPermissions = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract()
     ) { granted ->
-        DiagnosticLog.event("permission_result granted=${granted.containsAll(requiredPermissions)}")
-        statusView.text = if (granted.containsAll(requiredPermissions)) {
-            "Доступ разрешён. Нажмите «Начать чтение»."
-        } else {
-            "Доступ к пульсу не разрешён. Нажмите «Разрешить чтение пульса»."
-        }
+        val allowed = granted.containsAll(SessionAccess.permissions)
+        DiagnosticLog.event("session_permission_result all=$allowed")
+        statusView.text = if (allowed) "Доступ разрешён. Можно начать сеанс перед пробежкой."
+            else "Нужно разрешить чтение пульса и чтение в фоновом режиме."
+    }
+    private val notificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        DiagnosticLog.event("notification_permission=$granted")
+        launchSession()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        monitoring = savedInstanceState?.getBoolean("monitoring") ?: false
         voiceEnabled = savedInstanceState?.getBoolean("voice") ?: true
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(24), dp(24), dp(24), dp(24))
         }
-        fun label(value: String, size: Float = 17f): TextView =
-            TextView(this).apply {
-                text = value
-                textSize = size
-                setPadding(0, dp(10), 0, dp(10))
-                content.addView(this)
-            }
-        fun button(value: String, action: () -> Unit): Button =
-            Button(this).apply {
-                text = value
-                setOnClickListener { action() }
-                content.addView(this, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-                ))
-            }
+        fun label(value: String, size: Float = 17f): TextView = TextView(this).apply {
+            text = value
+            textSize = size
+            setPadding(0, dp(10), 0, dp(10))
+            content.addView(this)
+        }
+        fun button(value: String, action: () -> Unit): Button = Button(this).apply {
+            text = value
+            setOnClickListener { action() }
+            content.addView(this)
+        }
         label("PulseVoicePhone", 27f)
-        label("Пульс из Samsung Health")
+        label("Озвучка во время пробежки")
         bpmView = label("— уд/мин", 42f)
         timeView = label("Измерений пока нет")
-        statusView = label("Разрешите доступ к пульсу и начните чтение.")
+        statusView = label(PulseSessionService.status.value.message)
         button("Разрешить чтение пульса") { requestAccess() }
         button("Настройки Health Connect") {
-            if (sdkStatus() == HealthConnectClient.SDK_AVAILABLE) {
+            if (HealthConnectClient.getSdkStatus(this) == HealthConnectClient.SDK_AVAILABLE)
                 open(Intent(HealthConnectClient.ACTION_HEALTH_CONNECT_SETTINGS))
-            } else {
-                openProvider()
-            }
+            else openProvider()
         }
-        toggleButton = button("") {
-            monitoring = !monitoring
-            DiagnosticLog.event("monitoring=$monitoring")
-            updateButton()
-            if (!monitoring) {
-                tts?.stop()
-                statusView.text = "Чтение остановлено."
-            }
+        toggleButton = button("Начать сеанс") {
+            if (PulseSessionService.status.value.running) {
+                startService(Intent(this, PulseSessionService::class.java).setAction(PulseSessionService.STOP))
+            } else prepareSession()
         }
-        updateButton()
         CheckBox(this).apply {
             text = "Озвучивать по-русски каждые 10 секунд"
             isChecked = voiceEnabled
             setOnCheckedChangeListener { _, checked ->
                 voiceEnabled = checked
-                if (!checked) tts?.stop()
+                if (PulseSessionService.status.value.running) {
+                    startService(Intent(this@MainActivity, PulseSessionService::class.java)
+                        .setAction(PulseSessionService.SET_VOICE).putExtra("voice", checked))
+                }
             }
             content.addView(this)
         }
-        voiceView = label("Подготовка русского голоса…")
+        voiceView = label(PulseSessionService.status.value.voice)
         button("Диагностика и отчёт") {
             startActivity(Intent(this, DiagnosticsActivity::class.java))
         }
         button("Настройки голоса") { open(Intent("com.android.settings.TTS_SETTINGS")) }
-        label("Настройка:\n" +
-            "1. Часы должны быть сопряжены с телефоном через Galaxy Wearable.\n" +
-            "2. В Samsung Health на телефоне откройте настройки Health Connect и " +
-            "разрешите запись пульса. Название раздела зависит от версии Samsung Health.\n" +
-            "3. Измерьте пульс в Samsung Health на часах и дождитесь синхронизации.")
-        label("Здесь читаются сохранённые измерения Samsung Health за последние 24 часа. " +
-            "Приложение на часы устанавливать не нужно.\n\n" +
-            "Озвучиваются показания не старше 2 минут. При задержке синхронизации озвучка " +
-            "приостанавливается. Чтение выполняется каждые 10 секунд, пока открыт этот экран. " +
-            "Кнопки управляют чтением на телефоне; измерениями на часах управляет Samsung Health.")
+        button("Настройки батареи приложения") {
+            open(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:$packageName")))
+        }
+        label("Перед пробежкой:\n" +
+            "1. На часах: Samsung Health → настройки пульса → непрерывное измерение. " +
+            "Путь может отличаться по версии часов.\n" +
+            "2. На телефоне: разрешите Samsung Health записывать пульс в Health Connect.\n" +
+            "3. Здесь разрешите чтение пульса и фоновое чтение. Нажмите «Начать сеанс» " +
+            "и проверьте голос. После этого можно выключить экран.\n" +
+            "4. Если телефон ограничивает фоновые приложения, выберите для PulseVoicePhone " +
+            "режим батареи «Без ограничений».")
+        label("Сеанс продолжает чтение при скрытом приложении. Для остановки используйте " +
+            "кнопку здесь или в уведомлении. После перезагрузки/принудительной остановки " +
+            "нужно запустить сеанс снова.\n\n" +
+            "Новые данные зависят от синхронизации Samsung Health. Показания старше 2 минут " +
+            "не озвучиваются. Это чтение сохранённых данных, а не прямое подключение к датчику. " +
+            "Если телефон не поддерживает фоновое чтение Health Connect, сеанс недоступен.")
         button("Использование данных") {
             startActivity(Intent(this, PermissionsRationaleActivity::class.java))
         }
@@ -136,25 +130,15 @@ class MainActivity : ComponentActivity() {
         }
         setContentView(scroll)
         scroll.requestApplyInsets()
-        tts = TextToSpeech(applicationContext) { result ->
-            if (result == TextToSpeech.SUCCESS) {
-                val languageResult = tts?.setLanguage(Locale("ru", "RU"))
-                ttsReady = languageResult != null &&
-                    languageResult != TextToSpeech.LANG_MISSING_DATA &&
-                    languageResult != TextToSpeech.LANG_NOT_SUPPORTED
-                DiagnosticLog.event("tts_initialized ready=$ttsReady language=$languageResult")
-                voiceView.text = if (ttsReady) "Русский голос готов"
-                    else "Русский голос недоступен. Установите его в настройках голоса."
-            } else {
-                DiagnosticLog.event("tts_initialization_error code=$result")
-                voiceView.text = "Не удалось запустить синтез речи. Проверьте настройки голоса."
-            }
-        }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                while (true) {
-                    if (monitoring) refresh()
-                    delay(if (monitoring) PulsePolicy.POLL_INTERVAL_MS else 250L)
+                PulseSessionService.status.collect { state ->
+                    toggleButton.text = if (state.running) "Остановить сеанс" else "Начать сеанс"
+                    statusView.text = state.message
+                    voiceView.text = state.voice
+                    bpmView.text = state.sample?.let { "${it.bpm} уд/мин" } ?: "— уд/мин"
+                    timeView.text = state.sample?.let { "Измерено: ${formatter.format(it.time)}" }
+                        ?: "Нет доступного измерения"
                 }
             }
         }
@@ -162,21 +146,61 @@ class MainActivity : ComponentActivity() {
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
-    private fun updateButton() {
-        toggleButton.text = if (monitoring) "Остановить чтение" else "Начать чтение"
-    }
-
-    private fun sdkStatus(): Int = HealthConnectClient.getSdkStatus(this)
-
     private fun requestAccess() {
         try {
-            when (sdkStatus()) {
-                HealthConnectClient.SDK_AVAILABLE -> permissions.launch(requiredPermissions)
-                HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> openProvider()
-                else -> statusView.text = "Health Connect недоступен на этом устройстве."
+            if (HealthConnectClient.getSdkStatus(this) != HealthConnectClient.SDK_AVAILABLE) {
+                openProvider()
+                return
             }
+            val client = HealthConnectClient.getOrCreate(this)
+            if (!SessionAccess.backgroundSupported(client)) {
+                statusView.text = "Фоновое чтение Health Connect не поддерживается. Обновите Android/Health Connect."
+                return
+            }
+            healthPermissions.launch(SessionAccess.permissions)
         } catch (e: Exception) {
-            statusView.text = "Не удалось открыть запрос доступа. Проверьте Health Connect."
+            DiagnosticLog.event("permission_request_error class=${e.javaClass.name}")
+            statusView.text = "Не удалось запросить доступ. Проверьте Health Connect."
+        }
+    }
+
+    private fun prepareSession() {
+        lifecycleScope.launch {
+            try {
+                if (HealthConnectClient.getSdkStatus(this@MainActivity) != HealthConnectClient.SDK_AVAILABLE) {
+                    openProvider()
+                    return@launch
+                }
+                val client = HealthConnectClient.getOrCreate(this@MainActivity)
+                if (!SessionAccess.backgroundSupported(client)) {
+                    statusView.text = "Телефон не поддерживает чтение Health Connect с выключенным экраном."
+                    return@launch
+                }
+                if (!client.permissionController.getGrantedPermissions().containsAll(SessionAccess.permissions)) {
+                    statusView.text = "Сначала разрешите чтение пульса и чтение в фоне."
+                    requestAccess()
+                    return@launch
+                }
+                if (Build.VERSION.SDK_INT >= 33 &&
+                    checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                } else launchSession()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                DiagnosticLog.event("session_prepare_error class=${e.javaClass.name}")
+                statusView.text = "Не удалось подготовить сеанс. Откройте диагностику."
+            }
+        }
+    }
+
+    private fun launchSession() {
+        try {
+            startForegroundService(Intent(this, PulseSessionService::class.java)
+                .setAction(PulseSessionService.START).putExtra("voice", voiceEnabled))
+        } catch (e: Exception) {
+            DiagnosticLog.event("session_launch_error class=${e.javaClass.name}")
+            statusView.text = "Не удалось запустить фоновую озвучку. Откройте диагностику."
         }
     }
 
@@ -187,93 +211,24 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun open(intent: Intent) {
-        try {
-            startActivity(intent)
-        } catch (e: ActivityNotFoundException) {
+        try { startActivity(intent) }
+        catch (e: ActivityNotFoundException) {
             statusView.text = "Этот раздел недоступен. Откройте его в настройках телефона."
         }
     }
 
-    private fun clearReading(message: String) {
-        DiagnosticLog.event("reading_unavailable $message")
-        bpmView.text = "— уд/мин"
-        timeView.text = "Нет доступного измерения"
-        statusView.text = message
-        tts?.stop()
-    }
-
-    private suspend fun refresh() {
-        try {
-            when (sdkStatus()) {
-                HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> {
-                    clearReading("Установите или обновите Health Connect кнопкой настроек.")
-                    return
-                }
-                HealthConnectClient.SDK_AVAILABLE -> Unit
-                else -> {
-                    clearReading("Health Connect недоступен на этом устройстве.")
-                    return
-                }
-            }
-            val client = HealthConnectClient.getOrCreate(this)
-            if (!client.permissionController.getGrantedPermissions().containsAll(requiredPermissions)) {
-                clearReading("Нет доступа к пульсу. Нажмите «Разрешить чтение пульса».")
-                return
-            }
-            val sample = HealthRepository(client).latestSamsungPulse(Instant.now())
-            // Ignore a completed read if the user stopped it while the provider was responding.
-            if (!monitoring) return
-            if (sample == null) {
-                clearReading("Нет измерений Samsung Health за последние 24 часа. " +
-                    "Проверьте запись пульса в Health Connect и синхронизацию часов.")
-                return
-            }
-            val fresh = PulsePolicy.isFresh(sample, Instant.now())
-            DiagnosticLog.event("pulse_state fresh=$fresh voice_enabled=$voiceEnabled tts_ready=$ttsReady")
-            bpmView.text = "${sample.bpm} уд/мин"
-            timeView.text = "Измерено: ${formatter.format(sample.time)}"
-            statusView.text = if (fresh) "Свежее сохранённое измерение Samsung Health."
-                else "Измерению больше 2 минут. Озвучка приостановлена до свежих данных."
-            if (fresh && voiceEnabled && ttsReady) {
-                val result = tts?.speak("Пульс ${sample.bpm}", TextToSpeech.QUEUE_FLUSH, null, "pulse")
-                DiagnosticLog.event("tts_request result=$result")
-                if (result == TextToSpeech.ERROR) {
-                    voiceView.text = "Ошибка озвучки. Проверьте настройки голоса."
-                }
-            } else if (!fresh) {
-                tts?.stop()
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: SecurityException) {
-            DiagnosticLog.event("read_permission_revoked")
-            clearReading("Доступ к пульсу отозван. Разрешите чтение повторно.")
-        } catch (e: Exception) {
-            DiagnosticLog.event("read_error class=${e.javaClass.name}")
-            clearReading("Не удалось прочитать Health Connect. Повторим через 10 секунд.")
-        }
-    }
-
     override fun onSaveInstanceState(outState: Bundle) {
-        outState.putBoolean("monitoring", monitoring)
         outState.putBoolean("voice", voiceEnabled)
         super.onSaveInstanceState(outState)
     }
 
     override fun onStart() {
         super.onStart()
-        DiagnosticLog.event("main_visible monitoring=$monitoring")
+        DiagnosticLog.event("main_visible session_running=${PulseSessionService.status.value.running}")
     }
 
     override fun onStop() {
-        DiagnosticLog.event("main_hidden polling_paused")
-        tts?.stop()
+        DiagnosticLog.event("main_hidden session_running=${PulseSessionService.status.value.running}")
         super.onStop()
-    }
-
-    override fun onDestroy() {
-        tts?.shutdown()
-        tts = null
-        super.onDestroy()
     }
 }

@@ -156,7 +156,13 @@ class DiagnosticsActivity : ComponentActivity() {
                     DiagnosticLog.event("diagnostics_hc_status=$status")
                     if (status == HealthConnectClient.SDK_AVAILABLE) {
                         val client = HealthConnectClient.getOrCreate(this@DiagnosticsActivity)
-                        val granted = client.permissionController.getGrantedPermissions().contains(
+                        val backgroundSupported = SessionAccess.backgroundSupported(client)
+                        val permissions = client.permissionController.getGrantedPermissions()
+                        val backgroundGranted = permissions.contains(
+                            androidx.health.connect.client.permission.HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND)
+                        healthReport += "\nФоновое чтение: поддерживается=$backgroundSupported, разрешено=$backgroundGranted."
+                        DiagnosticLog.event("background_supported=$backgroundSupported background_granted=$backgroundGranted")
+                        val granted = permissions.contains(
                             HealthPermission.getReadPermission(HeartRateRecord::class))
                         healthReport += "\nЧтение пульса: " + if (granted) "разрешено." else "не разрешено."
                         DiagnosticLog.event("diagnostics_read_permission=$granted")
@@ -202,6 +208,7 @@ class DiagnosticsActivity : ComponentActivity() {
             "Отчёт: ${Instant.now()}\n" +
             "Устройство: ${Build.MANUFACTURER} ${Build.MODEL}\n" +
             "Android ${Build.VERSION.RELEASE}; API ${Build.VERSION.SDK_INT}\n" +
+            "Сеанс активен: ${PulseSessionService.status.value.running}\n" +
             "Громкость мультимедиа: ${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}/" +
             "${audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)}\n\n" +
             "$healthReport\n\n$voiceReport\n$heardReport\n\n" +
