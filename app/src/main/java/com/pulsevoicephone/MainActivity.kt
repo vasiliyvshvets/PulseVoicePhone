@@ -51,7 +51,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        voiceEnabled = savedInstanceState?.getBoolean("voice") ?: true
+        voiceEnabled = if (PulseSessionService.status.value.running)
+            PulseSessionService.status.value.voiceEnabled else savedInstanceState?.getBoolean("voice") ?: true
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(24), dp(24), dp(24))

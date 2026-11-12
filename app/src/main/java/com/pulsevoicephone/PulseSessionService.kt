@@ -30,6 +30,7 @@ import java.util.Locale
 
 data class SessionStatus(
     val running: Boolean = false,
+    val voiceEnabled: Boolean = true,
     val sample: PulseSample? = null,
     val message: String = "Перед пробежкой разрешите фоновое чтение и запустите сеанс.",
     val voice: String = "Голос ещё не запущен"
@@ -84,6 +85,7 @@ class PulseSessionService : Service() {
             }
             SET_VOICE -> {
                 voiceEnabled = intent.getBooleanExtra("voice", true)
+                mutableStatus.value = mutableStatus.value.copy(voiceEnabled = voiceEnabled)
                 if (!voiceEnabled) tts?.stop()
                 return START_NOT_STICKY
             }
@@ -102,7 +104,7 @@ class PulseSessionService : Service() {
             return START_NOT_STICKY
         }
         if (loop?.isActive == true) return START_NOT_STICKY
-        mutableStatus.value = mutableStatus.value.copy(running = true, message = "Сеанс запускается…")
+        mutableStatus.value = mutableStatus.value.copy(running = true, voiceEnabled = voiceEnabled, message = "Сеанс запускается…")
         DiagnosticLog.event("session_started")
         loop = scope.launch {
             try {
