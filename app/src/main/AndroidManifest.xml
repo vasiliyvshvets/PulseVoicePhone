@@ -5,7 +5,7 @@
         <package android:name="com.google.android.apps.healthdata" />
         <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
     </queries>
-    <application android:label="Pulse Voice Phone" android:allowBackup="false"
+    <application android:name=".PulseApplication" android:label="Pulse Voice Phone" android:allowBackup="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
@@ -13,6 +13,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".DiagnosticsActivity" android:exported="false" />
         <activity android:name=".PermissionsRationaleActivity" android:exported="true">
             <intent-filter>
                 <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />

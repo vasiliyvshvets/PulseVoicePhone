@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
     private val permissions = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract()
     ) { granted ->
+        DiagnosticLog.event("permission_result granted=${granted.containsAll(requiredPermissions)}")
         statusView.text = if (granted.containsAll(requiredPermissions)) {
             "Доступ разрешён. Нажмите «Начать чтение»."
         } else {
@@ -91,6 +92,7 @@ class MainActivity : ComponentActivity() {
         }
         toggleButton = button("") {
             monitoring = !monitoring
+            DiagnosticLog.event("monitoring=$monitoring")
             updateButton()
             if (!monitoring) {
                 tts?.stop()
@@ -108,6 +110,9 @@ class MainActivity : ComponentActivity() {
             content.addView(this)
         }
         voiceView = label("Подготовка русского голоса…")
+        button("Диагностика и отчёт") {
+            startActivity(Intent(this, DiagnosticsActivity::class.java))
+        }
         button("Настройки голоса") { open(Intent("com.android.settings.TTS_SETTINGS")) }
         label("Настройка:\n" +
             "1. Часы должны быть сопряжены с телефоном через Galaxy Wearable.\n" +
@@ -137,9 +142,11 @@ class MainActivity : ComponentActivity() {
                 ttsReady = languageResult != null &&
                     languageResult != TextToSpeech.LANG_MISSING_DATA &&
                     languageResult != TextToSpeech.LANG_NOT_SUPPORTED
+                DiagnosticLog.event("tts_initialized ready=$ttsReady language=$languageResult")
                 voiceView.text = if (ttsReady) "Русский голос готов"
                     else "Русский голос недоступен. Установите его в настройках голоса."
             } else {
+                DiagnosticLog.event("tts_initialization_error code=$result")
                 voiceView.text = "Не удалось запустить синтез речи. Проверьте настройки голоса."
             }
         }
@@ -188,6 +195,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun clearReading(message: String) {
+        DiagnosticLog.event("reading_unavailable $message")
         bpmView.text = "— уд/мин"
         timeView.text = "Нет доступного измерения"
         statusView.text = message
@@ -221,12 +229,14 @@ class MainActivity : ComponentActivity() {
                 return
             }
             val fresh = PulsePolicy.isFresh(sample, Instant.now())
+            DiagnosticLog.event("pulse_state fresh=$fresh voice_enabled=$voiceEnabled tts_ready=$ttsReady")
             bpmView.text = "${sample.bpm} уд/мин"
             timeView.text = "Измерено: ${formatter.format(sample.time)}"
             statusView.text = if (fresh) "Свежее сохранённое измерение Samsung Health."
                 else "Измерению больше 2 минут. Озвучка приостановлена до свежих данных."
             if (fresh && voiceEnabled && ttsReady) {
                 val result = tts?.speak("Пульс ${sample.bpm}", TextToSpeech.QUEUE_FLUSH, null, "pulse")
+                DiagnosticLog.event("tts_request result=$result")
                 if (result == TextToSpeech.ERROR) {
                     voiceView.text = "Ошибка озвучки. Проверьте настройки голоса."
                 }
@@ -236,8 +246,10 @@ class MainActivity : ComponentActivity() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: SecurityException) {
+            DiagnosticLog.event("read_permission_revoked")
             clearReading("Доступ к пульсу отозван. Разрешите чтение повторно.")
         } catch (e: Exception) {
+            DiagnosticLog.event("read_error class=${e.javaClass.name}")
             clearReading("Не удалось прочитать Health Connect. Повторим через 10 секунд.")
         }
     }
@@ -248,7 +260,13 @@ class MainActivity : ComponentActivity() {
         super.onSaveInstanceState(outState)
     }
 
+    override fun onStart() {
+        super.onStart()
+        DiagnosticLog.event("main_visible monitoring=$monitoring")
+    }
+
     override fun onStop() {
+        DiagnosticLog.event("main_hidden polling_paused")
         tts?.stop()
         super.onStop()
     }
