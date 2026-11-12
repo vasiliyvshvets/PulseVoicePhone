@@ -1,7 +1,8 @@
 name: Build Android APK
 on:
   push:
-    branches: [main]
+    branches: [main, 'feat/**']
+  pull_request:
   workflow_dispatch:
 jobs:
   build:
@@ -17,11 +18,17 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build phone and watch APKs
-        run: gradle :app:assembleDebug :wear:assembleDebug --stacktrace
+      - name: Test, lint and build phone APK
+        run: gradle :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: PulseVoicePhone-and-Watch-debug
+          name: PulseVoicePhone-HealthConnect-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification-reports
           path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            wear/build/outputs/apk/debug/wear-debug.apk
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.html
